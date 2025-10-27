@@ -7,14 +7,12 @@
 #include "../../include/mensagens.h"
 
 #define PORTA_PADRAO 4000
-#define TAM_BUFFER 1024
 #define MAX_CLIENTES 100
 #define SALDO_INICIAL 100
 
-// ---------- Estruturas auxiliares ----------
 typedef struct {
-    uint32_t address;   // IP do cliente (em inteiro)
-    uint32_t last_req;  // último ID de requisição recebido
+    uint32_t address;   // IP do cliente
+    uint32_t last_req;  // último ID processado
     uint32_t balance;   // saldo atual
 } Cliente;
 
@@ -25,26 +23,18 @@ typedef struct {
     socklen_t cliente_len;
 } ThreadArgs;
 
-// ---------- Tabela simples de clientes ----------
+// ---------- Tabela de clientes ----------
 static Cliente clientes[MAX_CLIENTES];
 static int num_clientes = 0;
 static pthread_mutex_t mutex_tabela = PTHREAD_MUTEX_INITIALIZER;
 
-// ---------- Funções auxiliares ----------
-
-// Procura cliente pelo IP ou cria um novo
-Cliente* obter_cliente(uint32_t address) {
-    pthread_mutex_lock(&mutex_tabela);
-
-    // já existe?
+// Busca cliente ou cria se não existir
+Cliente *obter_cliente(uint32_t address) {
     for (int i = 0; i < num_clientes; i++) {
-        if (clientes[i].address == address) {
-            pthread_mutex_unlock(&mutex_tabela);
+        if (clientes[i].address == address)
             return &clientes[i];
-        }
     }
 
-    // cria novo
     if (num_clientes < MAX_CLIENTES) {
         clientes[num_clientes].address = address;
         clientes[num_clientes].last_req = 0;
@@ -52,52 +42,61 @@ Cliente* obter_cliente(uint32_t address) {
         printf("Novo cliente adicionado (IP %u) com saldo inicial %d\n",
                address, SALDO_INICIAL);
         num_clientes++;
-        pthread_mutex_unlock(&mutex_tabela);
         return &clientes[num_clientes - 1];
     }
 
-    pthread_mutex_unlock(&mutex_tabela);
-    return NULL; // tabela cheia
+    return NULL;
 }
 
-// Processa uma requisição dentro da thread
+// ---------- Thread de processamento ----------
 void *processa_requisicao(void *args) {
     ThreadArgs *dados = (ThreadArgs *)args;
     uint32_t ip_origem = dados->cliente.sin_addr.s_addr;
+    uint32_t ip_destino = dados->pacote.data.req.dest_addr;
+    uint32_t valor = dados->pacote.data.req.value;
+    uint32_t id_req = dados->pacote.seqn;
 
-    Cliente *c = obter_cliente(ip_origem);
-    if (!c) {
+    pthread_mutex_lock(&mutex_tabela);
+
+    Cliente *origem = obter_cliente(ip_origem);
+    Cliente *destino = obter_cliente(ip_destino);
+
+    if (!origem || !destino) {
         printf("Erro: limite de clientes atingido.\n");
+        pthread_mutex_unlock(&mutex_tabela);
         free(dados);
         pthread_exit(NULL);
     }
 
-    pthread_mutex_lock(&mutex_tabela);
-
-    printf("Processando REQ id %u de %s (saldo atual %u)\n",
-           dados->pacote.seqn, inet_ntoa(dados->cliente.sin_addr), c->balance);
+    printf("REQ id %u: %s -> %s, valor=%u\n",
+           id_req, inet_ntoa(dados->cliente.sin_addr), inet_ntoa(*(struct in_addr *)&ip_destino), valor);
 
     packet_t ack;
     ack.type = TYPE_REQ_ACK;
-    ack.seqn = dados->pacote.seqn;
+    ack.seqn = id_req;
 
-    // Verifica duplicata
-    if (dados->pacote.seqn <= c->last_req) {
-        printf("REQ duplicada detectada do cliente %s (última %u)\n",
-               inet_ntoa(dados->cliente.sin_addr), c->last_req);
-        ack.data.ack.new_balance = c->balance;
+    // Evita duplicatas
+    if (id_req <= origem->last_req) {
+        printf("REQ duplicada de %s ignorada (última %u)\n",
+               inet_ntoa(dados->cliente.sin_addr), origem->last_req);
+        ack.data.ack.new_balance = origem->balance;
     }
     // Verifica saldo
-    else if (c->balance < dados->pacote.data.req.value) {
-        printf("Saldo insuficiente para cliente %s\n", inet_ntoa(dados->cliente.sin_addr));
-        ack.data.ack.new_balance = c->balance;
+    else if (origem->balance < valor) {
+        printf("Saldo insuficiente para %s (saldo=%u, valor=%u)\n",
+               inet_ntoa(dados->cliente.sin_addr), origem->balance, valor);
+        ack.data.ack.new_balance = origem->balance;
     }
+    // Faz a transferência
     else {
-        // Processa transação
-        c->balance -= dados->pacote.data.req.value;
-        c->last_req = dados->pacote.seqn;
-        printf("Transação OK -> novo saldo: %u\n", c->balance);
-        ack.data.ack.new_balance = c->balance;
+        origem->balance -= valor;
+        destino->balance += valor;
+        origem->last_req = id_req;
+        printf("Transferência OK: %s enviou %u para %s\n",
+               inet_ntoa(dados->cliente.sin_addr), valor, inet_ntoa(*(struct in_addr *)&ip_destino));
+        printf("Novo saldo origem: %u | saldo destino: %u\n",
+               origem->balance, destino->balance);
+        ack.data.ack.new_balance = origem->balance;
     }
 
     pthread_mutex_unlock(&mutex_tabela);
@@ -109,7 +108,7 @@ void *processa_requisicao(void *args) {
     pthread_exit(NULL);
 }
 
-// ---------- Função principal ----------
+// ---------- Main ----------
 int main(int argc, char *argv[]) {
     int sock;
     struct sockaddr_in servidor, cliente;
