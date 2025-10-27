@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include "../../include/mensagens.h"
 
 #define PORTA_PADRAO 4000
 #define TAM_BUFFER 1024
@@ -10,40 +11,46 @@
 int main(int argc, char *argv[]) {
     int sock;
     struct sockaddr_in servidor, cliente;
-    char buffer[TAM_BUFFER];
     socklen_t cliente_len = sizeof(cliente);
+    packet_t pacote;
 
-    // 1. Cria socket UDP
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("Erro ao criar socket");
         exit(1);
     }
 
-    // 2. Configura endereço do servidor
     servidor.sin_family = AF_INET;
     servidor.sin_addr.s_addr = INADDR_ANY;
     servidor.sin_port = htons(argc > 1 ? atoi(argv[1]) : PORTA_PADRAO);
 
-    // 3. Associa (bind)
     if (bind(sock, (struct sockaddr *)&servidor, sizeof(servidor)) < 0) {
         perror("Erro no bind");
         close(sock);
         exit(1);
     }
 
-    printf("Servidor escutando na porta %d...\n", ntohs(servidor.sin_port));
+    printf("Servidor aguardando requisições na porta %d...\n", ntohs(servidor.sin_port));
 
-    // 4. Recebe mensagens
     while (1) {
-        memset(buffer, 0, TAM_BUFFER);
-        recvfrom(sock, buffer, TAM_BUFFER, 0, (struct sockaddr *)&cliente, &cliente_len);
-        printf("Mensagem recebida de %s:%d -> %s\n",
-               inet_ntoa(cliente.sin_addr), ntohs(cliente.sin_port), buffer);
+        memset(&pacote, 0, sizeof(packet_t));
+        recvfrom(sock, &pacote, sizeof(packet_t), 0, (struct sockaddr *)&cliente, &cliente_len);
 
-        // 5. Responde ao cliente
-        char resposta[] = "ACK do servidor";
-        sendto(sock, resposta, strlen(resposta), 0, (struct sockaddr *)&cliente, cliente_len);
+        if (pacote.type == TYPE_REQ) {
+            printf("REQ recebida de %s -> id %u, destino %u, valor %u\n",
+                   inet_ntoa(cliente.sin_addr),
+                   pacote.seqn,
+                   pacote.data.req.dest_addr,
+                   pacote.data.req.value);
+
+            // Cria o ACK
+            packet_t ack;
+            ack.type = TYPE_REQ_ACK;
+            ack.seqn = pacote.seqn;
+            ack.data.ack.new_balance = 100 - pacote.data.req.value;  // exemplo simples
+
+            sendto(sock, &ack, sizeof(packet_t), 0, (struct sockaddr *)&cliente, cliente_len);
+        }
     }
 
     close(sock);
