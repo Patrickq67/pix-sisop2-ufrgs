@@ -68,8 +68,11 @@ void *processa_requisicao(void *args) {
         pthread_exit(NULL);
     }
 
-    printf("REQ id %u: %s -> %s, valor=%u\n",
-           id_req, inet_ntoa(dados->cliente.sin_addr), inet_ntoa(*(struct in_addr *)&ip_destino), valor);
+        printf("Cliente origem: %s | destino: %s | valor: %u\n",
+           inet_ntoa(dados->cliente.sin_addr),
+           inet_ntoa(*(struct in_addr *)&ip_destino),
+           valor);
+
 
     packet_t ack;
     ack.type = TYPE_REQ_ACK;
@@ -99,13 +102,19 @@ void *processa_requisicao(void *args) {
         ack.data.ack.new_balance = origem->balance;
     }
 
-    pthread_mutex_unlock(&mutex_tabela);
+        pthread_mutex_unlock(&mutex_tabela);
 
-    sendto(dados->sock, &ack, sizeof(packet_t), 0,
-           (struct sockaddr *)&dados->cliente, dados->cliente_len);
+    // ---- NOVO TRECHO ----
+    printf("=== Estado atual dos clientes ===\n");
+    for (int i = 0; i < num_clientes; i++) {
+        struct in_addr addr;
+        addr.s_addr = clientes[i].address;
+        printf("Cliente %d -> IP: %s | Saldo: %u | Último ID: %u\n",
+               i + 1, inet_ntoa(addr), clientes[i].balance, clientes[i].last_req);
+    }
+    printf("=================================\n");
+    // ----------------------
 
-    free(dados);
-    pthread_exit(NULL);
 }
 
 // ---------- Main ----------
