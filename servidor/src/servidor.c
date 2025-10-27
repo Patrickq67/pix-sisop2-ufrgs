@@ -3,10 +3,45 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 #include "../../include/mensagens.h"
 
 #define PORTA_PADRAO 4000
 #define TAM_BUFFER 1024
+
+// Estrutura para passar dados à thread
+typedef struct {
+    packet_t pacote;
+    struct sockaddr_in cliente;
+    int sock;
+    socklen_t cliente_len;
+} ThreadArgs;
+
+// Função executada pela thread
+void *processa_requisicao(void *args) {
+    ThreadArgs *dados = (ThreadArgs *)args;
+
+    printf("Thread iniciada para requisição id %u do cliente %s\n",
+           dados->pacote.seqn, inet_ntoa(dados->cliente.sin_addr));
+
+    // Simula o processamento da transação
+    sleep(1); // (só para ver que é paralelo)
+
+    // Cria o ACK
+    packet_t ack;
+    ack.type = TYPE_REQ_ACK;
+    ack.seqn = dados->pacote.seqn;
+    ack.data.ack.new_balance = 100 - dados->pacote.data.req.value;
+
+    sendto(dados->sock, &ack, sizeof(packet_t), 0,
+           (struct sockaddr *)&dados->cliente, dados->cliente_len);
+
+    printf("Thread finalizou requisição id %u -> saldo novo %u\n",
+           ack.seqn, ack.data.ack.new_balance);
+
+    free(dados);
+    pthread_exit(NULL);
+}
 
 int main(int argc, char *argv[]) {
     int sock;
@@ -37,19 +72,23 @@ int main(int argc, char *argv[]) {
         recvfrom(sock, &pacote, sizeof(packet_t), 0, (struct sockaddr *)&cliente, &cliente_len);
 
         if (pacote.type == TYPE_REQ) {
-            printf("REQ recebida de %s -> id %u, destino %u, valor %u\n",
-                   inet_ntoa(cliente.sin_addr),
-                   pacote.seqn,
-                   pacote.data.req.dest_addr,
-                   pacote.data.req.value);
+            printf("REQ recebida: id %u, valor %u\n", pacote.seqn, pacote.data.req.value);
 
-            // Cria o ACK
-            packet_t ack;
-            ack.type = TYPE_REQ_ACK;
-            ack.seqn = pacote.seqn;
-            ack.data.ack.new_balance = 100 - pacote.data.req.value;  // exemplo simples
+            // Cria argumentos para a nova thread
+            ThreadArgs *args = malloc(sizeof(ThreadArgs));
+            args->pacote = pacote;
+            args->cliente = cliente;
+            args->sock = sock;
+            args->cliente_len = cliente_len;
 
-            sendto(sock, &ack, sizeof(packet_t), 0, (struct sockaddr *)&cliente, cliente_len);
+            // Cria thread para processar
+            pthread_t tid;
+            if (pthread_create(&tid, NULL, processa_requisicao, args) != 0) {
+                perror("Erro ao criar thread");
+                free(args);
+            } else {
+                pthread_detach(tid); // Libera automaticamente após término
+            }
         }
     }
 
